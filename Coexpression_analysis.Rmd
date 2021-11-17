@@ -1,0 +1,795 @@
+---
+title: "Coexpression analysis"
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+  html_document:
+    df_print: paged
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r}
+library(tximportData)
+library(readr)
+library(tximport)
+library (rjson)
+library (limma)
+library (edgeR)
+library (gplots)
+library(GenomicFeatures)
+TxDb <- makeTxDbFromGFF(file ="Z:/Shared/Chiara_shared/Kajus_RNA_seq/quantification.dir/geneset_all.gtf")
+
+k <- keys(TxDb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(TxDb, k, "GENEID", "TXNAME")
+```
+
+```{r tximport}
+library(tximport)
+workingdir = "Z:/Shared/coexpression_RNA_seq/Quantification/quantification.dir//"
+file = list.files(path ="Z:/Shared/coexpression_RNA_seq/Quantification/quantification.dir/", pattern=".sf$")
+Files=unlist(file)
+name = gsub(".sf", "",Files)
+names(Files) <- name
+txi <- tximport(paste0(workingdir,Files), type = "salmon", tx2gene = tx2gene,countsFromAbundance = "lengthScaledTPM")
+df = txi$counts
+df_tmp = txi$abundance
+colnames(df) = name
+```
+
+```{r CPM_counts}
+Grouping = read.csv("Z:/Shared/coexpression_RNA_seq/Grouping.csv")
+filter = filterByExpr(df)
+remove_zero = df[filter, ]
+
+
+```
+
+```{r}
+count = DGEList (count = remove_zero) ##
+TMM_count = calcNormFactors(count, method = "TMM")
+CPM_Count = cpm(TMM_count, normalized.lib.sizes=TRUE, log=T, prior.count=1)
+
+
+```
+
+```{r}
+library(factoextra)
+#tiff("d:/dataset/new_plot_mirna/CPM_PCA_RNA.tiff" , width = 3, height = 2, units = 'in', res = 600)
+pca_data = t(CPM_Count)
+wdbc.pr <- prcomp(pca_data, center = TRUE, scale = TRUE)
+
+fviz_pca_ind(wdbc.pr, geom.ind = "point", pointshape = 21, 
+             pointsize = 2, 
+             fill.ind = Grouping$Group, 
+             col.ind = "black", 
+             palette = "jco", 
+             addEllipses = FALSE,
+             label = "var",
+             col.var = "black",
+             repel = TRUE,
+             legend.title = "Conditions") +
+  theme(text = element_text(size = 8),
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 8),legend.title  = element_text(size = 8),legend.text = element_text(size = 8))
+#dev.off()
+```
+
+```{r}
+seeker=function(x)
+{
+  return(as.character(Grouping[Grouping[,"Samples"]==x,"Group"]))
+}
+col_name = sapply (colnames(remove_zero), seeker)
+colnames(remove_zero) = col_name
+```
+
+```{r}
+library (DESeq2)
+library(tximport)
+library(ggplot2)
+library(dplyr)
+dds <- DESeqDataSetFromTximport(txi, colData=Grouping, design= ~Group+Rep)
+rlog_data <- rlog(dds)
+rv <- rowVars(assay(rlog_data))
+select <- order(rv, decreasing = TRUE)[seq_len(1000)]
+pca <- prcomp(t(assay(rlog_data)[select, ]))
+pca_data <- merge(pca$x, Grouping, by.x="row.names", by.y = "Group")
+th <- theme_gray(base_size=9) + theme(legend.position = "none")
+
+data.frame(PC = factor(colnames(pca$rotation), levels = colnames(pca$rotation)), var = pca$sdev^2/sum(pca$sdev^2)) %>%
+  ggplot() + aes(x=PC, y=var) + 
+  geom_bar(stat="identity") +
+  scale_y_continuous(labels = scales::percent, limits=c(0,1), name="% variance explained") + th -> waterfall
+suppressMessages(library(patchwork))
+  pc12 <- ggplot(as.data.frame(pca$x)) + aes(x = PC1, y=PC2, col = Grouping$Rep, shape=Grouping$Group)  + geom_point(size=3) + geom_line(aes(group=Grouping$Group )) + th 
+pc12 = pc12 + theme_minimal(base_size=9)
+```
+```{r}
+
+pc12 = pc12 + theme(
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA))
+        
+pc23 <- ggplot(as.data.frame(pca$x)) + aes(x = PC2, y=PC3, col = Grouping$Rep, shape=Grouping$Group) + geom_point(size=3) + geom_line(aes(group=Grouping$Group))+ th
+  pc13 <- ggplot(as.data.frame(pca$x)) + aes(x = PC1, y=PC3, col = Grouping$Rep, shape=Grouping$Group) + geom_point(size=3) + geom_line(aes(group=Grouping$Group))+ th
+
+pc24 <- ggplot(as.data.frame(pca$x)) + aes(x = PC2, y=PC4, col = Grouping$Rep, shape=Grouping$Group) + geom_point(size=3) + theme_gray(base_size=9)
+waterfall + {pc12+pc13} + plot_layout(ncol=1, heights=c(1,3))
+
+tiff('z:/Shared/coexpression_RNA_seq/PCA.png', units="in", width=8, height=5, res=600)
+waterfall + {pc12+pc13} + plot_layout(ncol=1, heights=c(1,3))
+
+dev.off()
+
+```
+```{r}
+rlogs_assay = assay(rlog_data)
+colnames(rlogs_assay) = colnames(CPM_Count)
+EGR1 = as.data.frame(rlogs_assay[rownames(rlogs_assay)%in%"ENSG00000120738",])
+colnames(EGR1) = "EGR1"
+EGR1_group = merge (EGR1,Grouping,by.x = "row.names",by.y = "Samples")
+
+reorder <- c("Control_0_mins", "TRIB1_OE_0_mins", "Control_30_mins","TRIB1_OE_30_mins","Control_60_mins","TRIB1_OE_60_mins")
+EGR1_group %>%
+arrange(sapply(Group, function(y) which(y == reorder))) -> rorder
+
+
+#tiff("z:/Shared/Thesis_data/egr1_COEXPRESSED.png" , width = 5, height = 5, units = 'in', res = 600, pointsize = 8)
+
+EGR1_PLT = ggplot (rorder, aes(x = Group,y = EGR1,fill = Group)) + 
+   geom_point(size = 1.5, stroke = 1, position=position_dodge(width=1)) +      stat_summary(fun.data =mean_se, geom="bar", position=position_dodge(width=1)) +  scale_x_discrete(limits=rorder$Group)
+EGR1_PLT
+#ggsave("z:/Shared/Thesis_data/egr1_COEXPRESSED.png", width = 10, height = 5, units = "in",dpi = 600)
+
+```  
+
+```{r}
+
+#tiff("z:/Shared/Thesis_data/FOS_COEXPRESSED.png" , width = 5, height = 5, units = 'in', res = 600, pointsize = 8)
+FOS = as.data.frame(rlogs_assay[rownames(rlogs_assay)%in%"ENSG00000170345",])
+colnames(FOS) = "FOS"
+FOS_group = merge (FOS,Grouping,by.x = "row.names",by.y = "Samples")
+
+FOS_group %>%
+arrange(sapply(Group, function(y) which(y == reorder))) -> rorder_FOS
+
+
+FOS_PLT = ggplot (rorder_FOS, aes(x = Group,y = FOS,fill = Group)) + 
+   geom_point(size = 1.5, stroke = 1, position=position_dodge(width=1)) +      stat_summary(fun.data =mean_se, geom="bar", position=position_dodge(width=1)) +    scale_x_discrete(limits=rorder$Group)
+FOS_PLT
+
+#ggsave("z:/Shared/Thesis_data/FOS_COEXPRESSED.png", width = 10, height = 5, units = "in",dpi = 600)
+
+```
+
+```{r}
+Group=as.factor(Grouping$Group)
+rep = as.factor(Grouping$Rep)
+Group=relevel(Group,ref="Control_0_mins")
+#design <- model.matrix(~ 0+Group + ethnicity)
+design <- model.matrix(~ 0+ Group+rep)
+colnames(design) <- gsub("Group","",colnames(design))
+dge=calcNormFactors(count)
+v=voom(dge,design,plot=FALSE,normalize.method="none")
+fit= lmFit(v, design)
+contrast.matrix <- makeContrasts (compar_30= (TRIB1_OE_30_mins-TRIB1_OE_0_mins)-(Control_30_mins-Control_0_mins),
+compar_60 = (TRIB1_OE_60_mins-TRIB1_OE_0_mins)-(Control_60_mins-Control_0_mins),
+compar_60_vs_30 = (TRIB1_OE_60_mins-TRIB1_OE_30_mins)-(Control_60_mins-Control_30_mins), compar_30TRIB1_30gfp = TRIB1_OE_0_mins - Control_0_mins, comapar_30_ctrl = TRIB1_OE_30_mins - Control_30_mins, comapar_60_ctrl = TRIB1_OE_60_mins - Control_60_mins,levels=design)
+
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+comparisons=list()
+comparisons[["compar_30"]]=1
+comparisons[["compar_60"]]=2
+comparisons[["compar_60_vs_30"]]=3
+comparisons[["compar_30TRIB1_30gfp"]]=4
+comparisons[["comapar_30_ctrl"]]=5
+comparisons[["comapar_60_ctrl"]]=6
+
+
+volcano.plot=function(x)
+{
+  cat("Working with ",x,".\n",sep="")
+  tt=topTable(fit2, coef=comparisons[[x]], adjust="BH",number=nrow(v))
+  basename=x
+  write.csv(tt,file=paste(basename,".diff_exp.csv",sep=""))
+  
+  tiff(paste(basename,"_volcano.png",sep=""), width = 3.5, height = 3.5, units = 'in', res = 600)
+  with(tt, plot(logFC, -log10(adj.P.Val), pch=20, main="Volcano plot", cex=.5,
+                xlab=bquote(~Log[2]~fold~change),
+                ylab=bquote(~-log[10]~Q~value),xlim=c(-6,6),cex.axis=0.4))
+  with(subset(tt, adj.P.Val<0.05 & abs(logFC)>0), points(logFC, -log10(adj.P.Val),
+                                                         pch=20, col="purple",
+                                                         cex=0.5))
+  abline(v=0, col="black", lty=3, lwd=1.0)
+  abline(h=-log10(0.05),lty=3,col="red")	
+  dev.off()
+  signif.upreg=tt[tt[,"logFC"]>=0&tt[,"adj.P.Val"]<=0.05,]
+  signif.downreg=tt[tt[,"logFC"]<=0&tt[,"adj.P.Val"]<=0.05,]
+  write.csv(signif.upreg,file=paste(basename,".signif.upreg.csv",sep=""))
+  write.csv(signif.downreg,file=paste(basename,".signif.downreg.csv",sep=""))
+  signif.change=c(rownames(signif.downreg),rownames(signif.upreg))
+  return(signif.change)
+}
+signif.genes=unique(unlist(lapply(names(comparisons),FUN=volcano.plot)))
+signif.data=v[rownames(v)%in%signif.genes,]
+
+getwd()
+```
+
+```{r}
+library (biomaRt)
+
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+ensembl_wt = as.character(unlist(rownames(signif.data)))
+res_wt = getBM(attributes= c('ensembl_gene_id','hgnc_symbol'), 
+               filters = 'ensembl_gene_id', 
+               values = ensembl_wt, 
+               mart = ensembl)
+signif.data_anno =  merge (signif.data$E,res_wt,by.x = "row.names",by.y = "ensembl_gene_id")
+rownames(signif.data_anno) = make.names(signif.data_anno$hgnc_symbol, unique = TRUE)
+average = rlogs_assay
+abergae_anno = rlogs_assay
+abergae_anno1 =  merge (abergae_anno,res_wt,by.x = "row.names",by.y = "ensembl_gene_id")
+
+
+colnames(average) = gsub("1|2|3$","",colnames(average))
+
+avgs = as.data.frame((t(apply(average, 1, function(x) tapply(x, colnames(average), mean)))))
+avg = merge (avgs,res_wt,by.x = "row.names",by.y = "ensembl_gene_id")
+rownames(avg) = make.names(avg$hgnc_symbol,unique = TRUE)
+avg$hgnc_symbol = NULL
+avg$Row.names = NULL
+signif.data_anno$hgnc_symbol = NULL
+signif.data_anno$Row.names =NULL
+```
+
+```{r}
+GroupColors=as.character(Group)
+GroupColors=gsub("Control_0_mins","burlywood4",GroupColors)
+GroupColors=gsub("Control_30_mins","Red",GroupColors)
+GroupColors=gsub("Control_60_mins","cadetblue2",GroupColors)
+
+GroupColors=gsub("TRIB1_OE_0_mins","aquamarine3",GroupColors)
+GroupColors=gsub("TRIB1_OE_30_mins","brown3",GroupColors)
+GroupColors=gsub("TRIB1_OE_60_mins","darkgoldenrod3",GroupColors)
+
+rows.cor <- cor(t(signif.data_anno),  method = "pearson")
+clustering_distance_rows = as.dist(1 - rows.cor)
+
+dist.pear <- function(x) as.dist(1-cor(t(x)))
+hclust.ave <- function(x) hclust(x, method="average")
+tiff("Heatmap.png", width = 6, height = 7, units = 'in', res = 600)
+
+
+
+colnames(signif.data_anno) = gsub("trimmed-","",colnames(signif.data_anno))
+heatmap.2(as.matrix(signif.data_anno), trace="none", distfun=dist.pear, hclustfun=hclust.ave,race="none",cexCol = 0.8,ColSideColors=GroupColors,col=bluered(75),scale = "row",margins=c(7,8),srtCol=45)
+dev.off()
+```
+
+```{r}
+
+
+avgs = avg[!grepl("^x",rownames(avg)),]
+#cols.cor <- cor(signif.data_anno, use = "pairwise.complete.obs", method = "pearson")
+rows.cor <- cor(t(avgs),  method = "pearson")
+col.cor <- cor(t(avgs),  method = "pearson")
+
+
+#tiff("Heatmap_cor.png", width = 6, height = 7, units = 'in', res = 600)
+
+colnames(avgs) = gsub ("trimmed-","",colnames(avgs))
+pheatmap(avgs, scale = "row", 
+    clustering_distance_rows = as.dist(1 - rows.cor),
+    clustering_distance_cols = as.dist(1 - col.cor),
+    cutree_rows=5,
+    color=colorRampPalette(c("navy", "white", "red"))(50),treeheight_row = 100, height = 10,filename = "z:/Shared/coexpression_RNA_seq/heatmap.cor.png")
+
+GroupColors=as.character(colnames(avgs))
+GroupColors=gsub("GFP_0_mins","burlywood4",GroupColors)
+GroupColors=gsub("GFP_30_mins","Red",GroupColors)
+GroupColors=gsub("GFP_60_mins","cadetblue2",GroupColors)
+
+GroupColors=gsub("TRIB_OE_0_mins","aquamarine3",GroupColors)
+GroupColors=gsub("TRIB_OE_30_mins","brown3",GroupColors)
+GroupColors=gsub("TRIB_OE_60_mins","darkgoldenrod3",GroupColors)
+
+avgs = avgs[!grepl("^X",rownames(avgs)),]
+
+tiff("z:/Shared/coexpression_RNA_seq//Heatmap.png", width = 6, height = 7, units = 'in', res = 600)
+
+heatmap.2(as.matrix(avgs), trace="none", distfun=dist.pear, hclustfun=hclust.ave,race="row",cexCol = 0.8,ColSideColors=GroupColors,col=bluered(75),scale = "row",margins=c(8,5),srtCol=45)
+dev.off()
+                
+```
+```{r}
+g = cutree(as.hclust(out$tree_row), 5)
+clust1 = g[g==1]
+
+```
+```{r}
+library(reshape2)
+clustel1_all_genes = avg[rownames(avg)%in%names(clust1),]
+
+melten_all =  melt(clustel1_all_genes) # melt the dataframe using topics as id
+
+ggplot(melten, aes(x = value, y = variable, colour = variable)) + geom_line()
+```
+
+```{r}
+library (ggplot2)
+library(optparse)
+
+files = list.files(path = "z:/Shared/Cancer_normalied/Trib1_modules/",pattern = 'trib1_module.tsv')
+  data <- lapply(paste0("z:/Shared/Cancer_normalied/Trib1_modules/",files), read.table, sep="\t", header=TRUE)
+  names (data) = basename(files)
+  combined.data <- do.call(rbind, data)
+  combined.data$cancery_type = rownames(combined.data)
+  combined.data$cancery_type = gsub ("_trib1_module.tsv.*","",combined.data$cancery_type)
+  combined.data$gene_id = gsub ("\\..*","",combined.data$gene_id)
+  
+  prostate_cancer = as.data.frame(data["Prostate_cancer_trib1_module.tsv"])
+  
+    prostate_cancer$Prostate_cancer_trib1_module.tsv.gene_id = gsub ("\\..*","",prostate_cancer$Prostate_cancer_trib1_module.tsv.gene_id)
+
+```
+
+```{r}
+signig_prostate = (intersect(prostate_cancer$Prostate_cancer_trib1_module.tsv.gene_id,rownames(signif.data_anno)))
+```
+```{r}
+genes.matrix <- reshape2::dcast(combined.data, cancery_type ~ gene_id )
+  row.names(genes.matrix) <- genes.matrix$cancery_type
+  genes.matrix <- genes.matrix[,-1]
+  genes.matrix <- as.matrix(genes.matrix)
+  genes.matrix[genes.matrix > 1] <- 1
+  genes.matrix[is.na(genes.matrix)] <- 0
+  mode(genes.matrix) = "numeric"
+  sum_genes = colSums(genes.matrix)
+  genes_greater_than8 = sum_genes[sum_genes>=0]
+  genes_greater_than11.matrix = genes.matrix[,colnames(genes.matrix)%in%names(genes_greater_than8)]
+  
+all_cancer_coexpressed =  (intersect(colnames(genes_greater_than11.matrix),rownames(signif.data_anno)))
+```
+
+```{r}
+genes_coexpr = abergae_anno1[abergae_anno1$hgnc_symbol%in%all_cancer_coexpressed,]
+genes_coexpr$Row.names = NULL
+genes_coexpr$ensembl_transcript_id = NULL
+genes_coexpr1 = genes_coexpr[!duplicated(genes_coexpr),]
+rownames(genes_coexpr1) = genes_coexpr1$hgnc_symbol
+#genes_coexpr1$hgnc_symbol = NULL
+
+genes_split = dlply(genes_coexpr1,"rownames(genes_coexpr1)")
+
+
+plots = function(x)
+{
+  d1 = as.data.frame(x)
+  colnames(d1) = colnames(genes_coexpr1)
+  rownames(d1) = d1$hgnc_symbol
+  basename = d1$hgnc_symbol
+  d1$hgnc_symbol = NULL
+  print (basename)
+  d2 = as.data.frame(t(d1))
+
+  colnames(d2) = "values"
+  d2$variable = gsub ("trimmed-|1$|2$|3$","",rownames(d2))
+  d2$time = gsub ("GFP_|_mins|TRIB1_OE_|_mins","",d2$variable)
+  d2$conditions = gsub ("_0_mins|_30_mins|_60_mins","",d2$variable)
+  ggplot (d2, aes(x = time,y = values,color = conditions)) + 
+  geom_point(size = 1.5, stroke = 1, position=position_dodge(width=0.5)) + 
+  stat_summary(fun.data=mean_se, geom="pointrange", position=position_dodge(width=0.5),  shape=3, fatten=3) +
+  theme_classic(base_size=8) + 
+  scale_y_continuous(name="rlog") +
+  scale_color_discrete(name=NULL) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "top", axis.text.x = element_text(size=10,color =  "black"),
+        axis.text.y = element_text(size = 10, color = "black"))
+
+  ggsave(paste(basename,"stripchart.png",sep="_"), width = 3.5, height = 3.5, units = "in", dpi = 600)
+
+}
+
+lapply(genes_split, plots)
+
+```
+
+```{r}
+IER_genes = c("EGR1","FOS","IER2","JUN","JUNB","ATF3","DUSP1","NR4A1","ZGP36","FOSB","MAFF","DUSP","JUN","RHOB","ZFP36L")
+
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", mirror = "useast")
+ensembl_wt = as.character(unlist(rownames(rlogs_assay)))
+res_wt = getBM(attributes= c('ensembl_gene_id','hgnc_symbol'), 
+               filters = 'ensembl_gene_id', 
+               values = ensembl_wt, 
+               mart = ensembl)
+rlogs_assay_anno =  merge (rlogs_assay,res_wt,by.x = "row.names",by.y = "ensembl_gene_id")
+rownames(rlogs_assay_anno) = make.names(rlogs_assay_anno$hgnc_symbol, unique = TRUE)
+rlogs_assay_anno$Row.names = NULL
+ier_rlog = rlogs_assay_anno[rownames(rlogs_assay_anno)%in%IER_genes,]
+
+```
+
+```{r}
+
+patterns <- c ("^ATF3","DUSP1$","^EGR1$","^FOS$","^FOSB$",
+               "^IER2$","^JUN$","^MCL$","^NR4A1$","TRIB1","^JUNB$","^ZFP36$",
+               "^MAFF$","^DUSP$","^PPP1R15A$","^RHOB$","^ZFP36L$")
+
+timepoints0 = read.csv("z:/Shared/coexpression_RNA_seq/compar_30TRIB1_30gfp.diff_exp.csv")
+
+timepoint0_anno = merge (timepoints0,res_wt,by.x = "X",by.y = "ensembl_gene_id")
+
+coexpressed_genes = timepoint0_anno[grepl(paste(patterns, collapse="|"), timepoint0_anno$hgnc_symbol),]
+coexpressed_genes$X = NULL
+coexpressed_genes$hgnc_symbol= NULL
+coexpressed_genes$ensembl_transcript_id = NULL
+coexpressed_genes1 = coexpressed_genes[!duplicated(coexpressed_genes),]
+coexpressed_genes1_fc = as.data.frame(coexpressed_genes1$logFC)
+colnames(coexpressed_genes1_fc) = "FC"
+coexpressed_genes1_fc$types = "coexpressed"
+
+ntcoexpressed_genes = timepoint0_anno[!grepl(paste(patterns, collapse="|"), timepoint0_anno$hgnc_symbol),]
+ntcoexpressed_genes$X = NULL
+ntcoexpressed_genes$hgnc_symbol= NULL
+ntcoexpressed_genes$ensembl_transcript_id = NULL
+ntcoexpressed_genes = ntcoexpressed_genes[!duplicated(ntcoexpressed_genes),]
+ntcoexpressed_genes_fc = as.data.frame(ntcoexpressed_genes$logFC)
+colnames(ntcoexpressed_genes_fc) = "FC"
+ntcoexpressed_genes_fc$types = "Not_COexpressed"
+timepoint0 = rbind (ntcoexpressed_genes_fc,coexpressed_genes1_fc)
+timepoint0$Time = "0_mins"
+
+time30 = read.csv("z:/Shared/coexpression_RNA_seq/comapar_30_ctrl.diff_exp.csv")
+
+timepoint30_anno = merge (time30,res_wt,by.x = "X",by.y = "ensembl_gene_id")
+
+coexpressed_genes = timepoint30_anno[grepl(paste(patterns, collapse="|"), timepoint0_anno$hgnc_symbol),]
+coexpressed_genes$X = NULL
+coexpressed_genes$hgnc_symbol= NULL
+coexpressed_genes$ensembl_transcript_id = NULL
+coexpressed_genes1 = coexpressed_genes[!duplicated(coexpressed_genes),]
+coexpressed_genes1_fc = as.data.frame(coexpressed_genes1$logFC)
+colnames(coexpressed_genes1_fc) = "FC"
+coexpressed_genes1_fc$types = "coexpressed"
+
+ntcoexpressed_genes = timepoint0_anno[!grepl(paste(patterns, collapse="|"), timepoint0_anno$hgnc_symbol),]
+ntcoexpressed_genes$X = NULL
+ntcoexpressed_genes$hgnc_symbol= NULL
+ntcoexpressed_genes$ensembl_transcript_id = NULL
+ntcoexpressed_genes = ntcoexpressed_genes[!duplicated(ntcoexpressed_genes),]
+ntcoexpressed_genes_fc = as.data.frame(ntcoexpressed_genes$logFC)
+colnames(ntcoexpressed_genes_fc) = "FC"
+ntcoexpressed_genes_fc$types = "Not_COexpressed"
+timepoint30 = rbind (ntcoexpressed_genes_fc,coexpressed_genes1_fc)
+timepoint30$Time = "30_mins"
+
+time30 = read.csv("z:/Shared/coexpression_RNA_seq/comapar_30_ctrl.diff_exp.csv")
+
+timepoint30_anno = merge (time30,res_wt,by.x = "X",by.y = "ensembl_gene_id")
+
+coexpressed_genes = timepoint30_anno[grepl(paste(patterns, collapse="|"), timepoint0_anno$hgnc_symbol),]
+coexpressed_genes$X = NULL
+coexpressed_genes$hgnc_symbol= NULL
+coexpressed_genes$ensembl_transcript_id = NULL
+coexpressed_genes1 = coexpressed_genes[!duplicated(coexpressed_genes),]
+coexpressed_genes1_fc = as.data.frame(coexpressed_genes1$logFC)
+colnames(coexpressed_genes1_fc) = "FC"
+coexpressed_genes1_fc$types = "coexpressed"
+
+ntcoexpressed_genes = timepoint0_anno[!grepl(paste(patterns, collapse="|"), timepoint0_anno$hgnc_symbol),]
+ntcoexpressed_genes$X = NULL
+ntcoexpressed_genes$hgnc_symbol= NULL
+ntcoexpressed_genes$ensembl_transcript_id = NULL
+ntcoexpressed_genes = ntcoexpressed_genes[!duplicated(ntcoexpressed_genes),]
+ntcoexpressed_genes_fc = as.data.frame(ntcoexpressed_genes$logFC)
+colnames(ntcoexpressed_genes_fc) = "FC"
+ntcoexpressed_genes_fc$types = "Not_COexpressed"
+timepoint30 = rbind (ntcoexpressed_genes_fc,coexpressed_genes1_fc)
+timepoint30$Time = "30_mins"
+
+time60 = read.csv("z:/Shared/coexpression_RNA_seq/comapar_60_ctrl.diff_exp.csv")
+
+timepoint60_anno = merge (time60,res_wt,by.x = "X",by.y = "ensembl_gene_id")
+
+coexpressed_genes = timepoint60_anno[grepl(paste(patterns, collapse="|"), timepoint0_anno$hgnc_symbol),]
+coexpressed_genes$X = NULL
+coexpressed_genes$hgnc_symbol= NULL
+coexpressed_genes$ensembl_transcript_id = NULL
+coexpressed_genes1 = coexpressed_genes[!duplicated(coexpressed_genes),]
+coexpressed_genes1_fc = as.data.frame(coexpressed_genes1$logFC)
+colnames(coexpressed_genes1_fc) = "FC"
+coexpressed_genes1_fc$types = "coexpressed"
+
+ntcoexpressed_genes = timepoint0_anno[!grepl(paste(patterns, collapse="|"), timepoint0_anno$hgnc_symbol),]
+ntcoexpressed_genes$X = NULL
+ntcoexpressed_genes$hgnc_symbol= NULL
+ntcoexpressed_genes$ensembl_transcript_id = NULL
+ntcoexpressed_genes = ntcoexpressed_genes[!duplicated(ntcoexpressed_genes),]
+ntcoexpressed_genes_fc = as.data.frame(ntcoexpressed_genes$logFC)
+colnames(ntcoexpressed_genes_fc) = "FC"
+ntcoexpressed_genes_fc$types = "Not_COexpressed"
+timepoint60 = rbind (ntcoexpressed_genes_fc,coexpressed_genes1_fc)
+timepoint60$Time = "60_mins"
+
+final = rbind (timepoint60,timepoint30,timepoint0)
+```
+
+```{r}
+
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, draw_group = function(self, data, ..., draw_quantiles = NULL){
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1,'group']
+  newdata <- plyr::arrange(transform(data, x = if(grp%%2==1) xminv else xmaxv), if(grp%%2==1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1,nrow(newdata)-1,nrow(newdata)), 'x'] <- round(newdata[1, 'x']) 
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <= 
+                                              1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function (mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, position = position, show.legend = show.legend, inherit.aes = inherit.aes, params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+
+p = ggplot(final, aes(Time, FC,, fill=types)) + 
+  geom_split_violin(trim = TRUE) + 
+  geom_boxplot(width = 0.25, notch = FALSE, notchwidth = .4, outlier.shape = NA, coef=0) +
+  labs(x=NULL,y="Log2 FC") +
+  theme_classic() +
+  theme(text = element_text(size = 20)) +
+  scale_fill_manual(values=c("#E69F00", "#999999"))
+                   
+ p1 = p+ coord_cartesian(ylim=c(-1,1))
+```
+
+```{r}
+rownames(ier_rlog) = ier_rlog$hgnc_symbol
+
+
+Iergenes_split = dlply(ier_rlog,"rownames(ier_rlog)")
+
+
+plots = function(x)
+{
+  d1 = as.data.frame(x)
+  colnames(d1) = colnames(genes_coexpr1)
+  rownames(d1) = d1$hgnc_symbol
+  basename = d1$hgnc_symbol
+  d1$hgnc_symbol = NULL
+  print (basename)
+  d2 = as.data.frame(t(d1))
+
+  colnames(d2) = "values"
+  d2$variable = gsub ("trimmed-|1$|2$|3$","",rownames(d2))
+  d2$time = gsub ("GFP_|_mins|TRIB1_OE_|_mins","",d2$variable)
+  d2$conditions = gsub ("_0_mins|_30_mins|_60_mins","",d2$variable)
+  ggplot (d2, aes(x = time,y = values,color = conditions)) + 
+  geom_point(size = 1.5, stroke = 1, position=position_dodge(width=0.5)) + 
+  stat_summary(fun.data=mean_se, geom="pointrange", position=position_dodge(width=0.5),  shape=3, fatten=3) +
+  theme_classic(base_size=8) + 
+  scale_y_continuous(name="rlog") +
+  scale_color_discrete(name=NULL) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "top", axis.text.x = element_text(size=10,color =  "black"),
+        axis.text.y = element_text(size = 10, color = "black"))
+
+  ggsave(paste(basename,"stripchart.png",sep="_"), width = 3.5, height = 3.5, units = "in", dpi = 600)
+
+}
+
+lapply(Iergenes_split, plots)
+
+```
+
+```{r}
+clustel1_genes = avg[rownames(avg)%in%all_cancer_coexpressed,]
+
+melten =  melt(clustel1_genes) # melt the dataframe using topics as id
+
+ggplot(melten, aes(x = value, y = variable, colour = variable)) + geom_line()
+
+
+ggplot (melten, aes(x = variable,y = value,color = variable)) + 
+  geom_point(size = 1.5, stroke = 1, position=position_dodge(width=0.5)) + 
+  stat_summary(fun.data=mean_se, geom="pointrange", position=position_dodge(width=1),  shape=3, fatten=3) +
+  theme_classic(base_size=8) + 
+  scale_y_continuous(name="rlog") +
+  scale_color_discrete(name=NULL) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "top", axis.text.x = element_text(size=10,color =  "black"),
+        axis.text.y = element_text(size = 10, color = "black"))
+
+```
+```{r}
+
+```
+
+```{r}
+library (biomaRt)
+
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl",mirror = "useast")
+ensembl_wt = as.character(unlist(rownames(CPM_Count)))
+res_wt = getBM(attributes= c('ensembl_gene_id','ensembl_transcript_id','hgnc_symbol'), 
+               filters = 'ensembl_gene_id', 
+               values = ensembl_wt, 
+               mart = ensembl)
+background_step1 =  merge (CPM_Count,res_wt,by.x = "row.names",by.y = "ensembl_gene_id")
+
+background_step1$ensembl_transcript_id = gsub("\\..*","",background_step1$ensembl_transcript_id)
+
+```
+
+```{r}
+library(GenomicFeatures)
+library(dplyr)
+
+TxDb <- makeTxDbFromGFF(file = "C:/Users/Sumeet/Desktop/Deng/Homo_sapiens.GRCh38.93.gtf.gz")
+threeUTRs          <- threeUTRsByTranscript(TxDb, use.names=TRUE)
+length_threeUTRs   <- width(ranges(threeUTRs))
+the_lengths        <- as.data.frame(length_threeUTRs)
+the_lengths        <- the_lengths %>% group_by(group, group_name) %>% dplyr::summarise(sum(value))
+the_lengths        <- unique(the_lengths[,c("group_name", "sum(value)")])
+colnames(the_lengths) <- c("trans_id", "3_UTR_Length")
+background = merge (background_step1,the_lengths,by.x = "ensembl_transcript_id",by.y = "trans_id")
+down_Regs_enrich = merge(signif.data$E, background, by.y = "Row.names", by.x = "row.names")
+#up_Regs_enrich = merge(up_RNAslps_down_trgt_miRNAs_add_trgt_miRNAs, background, by = "Row.names")
+
+```
+
+# GOSEQ analysis down_regs_enrich (down regs mRNA and up regs miRNAs)
+```{r}
+library(goseq)
+library(KEGGREST)
+library(plyr)
+
+macrophages_targted_genes = unique(background$Row.names)
+downregs_mRNA_lps_upregs_miRNAs = unique(subset(down_Regs_enrich, select =  Row.names))
+gene_name = as.data.frame(macrophages_targted_genes)
+colnames(gene_name) = "ID"
+colnames(downregs_mRNA_lps_upregs_miRNAs) = "ensembl_transcript_id"
+downregs_mRNA_lps_upregs_miRNAs$value = 1
+tmp = merge (gene_name,downregs_mRNA_lps_upregs_miRNAs, by.x = "ID", by.y = "ensembl_transcript_id", all = TRUE)
+tmp[is.na(tmp)] <- 0
+gene = as.integer(tmp[,2])
+names(gene) = tmp$ID
+gene = gene[!duplicated(names(gene))]
+bias_data = background[background$Row.names%in% names(gene),]
+bias_data = subset(bias_data, select = c("Row.names","3_UTR_Length"))
+bias_data = bias_data[!duplicated(bias_data$Row.names),]
+rownames(bias_data) = bias_data$Row.names
+bias_data$Row.names = NULL
+colnames(bias_data) = NULL
+bias_data1 = as.vector(t(bias_data))
+names(bias_data1) = rownames(bias_data) 
+
+genes = gene[names(gene)%in%names(bias_data1)]
+
+```
+
+```{r}
+pwf=nullp(genes,bias.data = bias_data1)
+
+GO.counts=goseq(pwf,"hg19","ensGene")
+
+getGeneLists <- function(pwf, goterms, genome, ids){
+  gene2cat <- getgo(rownames(pwf), genome, ids)
+  cat2gene <- split(rep(names(gene2cat), sapply(gene2cat, length)),
+                    unlist(gene2cat, use.names = FALSE))
+  out <- list()
+  for(term in goterms){
+    tmp <- pwf[cat2gene[[term]],]
+    tmp <- rownames(tmp[tmp$DEgenes > 0, ])
+    out[[term]] <- tmp
+  }
+  out
+}
+
+goterms <- GO.counts$category 
+goList <- getGeneLists(pwf, goterms, "hg38", "ensGene")
+GO.counts$EnsemblID <- sapply(GO.counts$category, function(x) goList[[x]])
+GO.counts <- GO.counts[GO.counts$numInCat > 10,]
+GO.counts$Enrich <- (GO.counts$numDEInCat/sum(gene))/(GO.counts$numInCat/length(gene))
+GO.counts$FDR <- p.adjust(GO.counts$over_represented_pvalue, method="BH")
+downregsmRNA_upregs_miRNAs_GO = GO.counts
+```
+```{r}
+   en2eg=as.list(org.Hs.egENSEMBL2EG)
+ # Get the mapping from Entrez 2 KEGG
+   eg2kegg=as.list(org.Hs.egPATH)
+ # Define a function which gets all unique KEGG IDs
+   # associated with a set of Entrez IDs
+   grepKEGG=function(id,mapkeys){unique(unlist(mapkeys[id],use.names=FALSE))}
+ # Apply this function to every entry in the mapping from
+   # ENSEMBL 2 Entrez to combine the two maps
+  kegg=lapply(en2eg,grepKEGG,eg2kegg)
+ head(kegg)
+ pwf=nullp(genes,bias.data = bias_data1)
+ KEGG=goseq(pwf,gene2cat=kegg)
+ KEGG$NAME = KEGG$category
+ KEGG$NAME = paste0('hsa', KEGG$NAME)
+ KEGG <- as.data.frame(KEGG[KEGG$numDEInCat > 0, ])
+ KEGG <- as.data.frame(KEGG[KEGG$numInCat > 10, ])
+ allKEGGs <- stack(kegg)
+ allKEGG_sig <- allKEGGs[allKEGGs$values %in% KEGG$category,]
+ value = dlply(allKEGG_sig, "values")
+
+
+ KEGG$description <- sapply(KEGG$category, function(x) tryCatch(keggGet(paste0("hsa",x))[[1]]$NAME,
+                                                                error = function(e) NA))
+ add_genes <- function(kegg_pathway, mappings, sig_genes) {
+  
+    pathway_genes <- mappings[[kegg_pathway]]$ind
+    sign_in_pathway = intersect(pathway_genes, sig_genes)
+    collapsed_ids <- paste(sign_in_pathway, collapse=",")
+    return (collapsed_ids)
+ }
+ 
+ KEGG$genes <- sapply(KEGG$category, add_genes, value, names(gene)[gene>0])
+ KEGG$Enrich <- (KEGG$numDEInCat/sum(gene))/(KEGG$numInCat/length(gene))
+ KEGG$FDR <- p.adjust(KEGG$over_represented_pvalue, method="BH")
+ #kegg_r = KEGG_df[- grep("NA", KEGG_df$miRNAs),]
+ #kegg_r <- KEGG[KEGG$numInCat > 10,]
+ kegg_r = KEGG
+ kegg_r$FDR <- p.adjust(kegg_r$over_represented_pvalue, method="BH")
+ downregsmRNA_upregs_miRNAs_KEGG = kegg_r
+ 
+```
+
+# GOSEQ plot analysis down_regs_enrich
+```{r}
+
+tiff("z:/Shared/coexpression_RNA_seq/Geneontology_coexpressed.png" , width = 8, height = 5, units = 'in', res = 600, pointsize = 8)
+GO.counts  %>% 
+    top_n(10, wt=-FDR) %>% 
+    mutate(hitsPerc=numDEInCat*100/numInCat) %>% 
+    ggplot(aes(x=hitsPerc, 
+               y=term, 
+               colour=FDR, 
+               size=numDEInCat)) +
+        geom_point() +
+        expand_limits(x=0) +
+        labs(x="Hits (%)", y="GO term", colour="FDR", size="Count")
+
+dev.off()
+```
+
+
+# KEGG plot analysis down_regs_enrich
+
+```{r}
+
+tiff("z:/Shared/coexpression_RNA_seq/Pathway_coexpressed.png" , width = 8, height = 5, units = 'in', res = 600, pointsize = 8)
+kegg_r %>% 
+    top_n(10, wt=-FDR) %>% 
+    mutate(hitsPerc=numDEInCat*100/numInCat) %>% 
+    ggplot(aes(x=hitsPerc, 
+               y=description, 
+               colour=FDR, 
+               size=numDEInCat)) +
+       geom_point() +
+        expand_limits(x=0) +
+        labs(x="Hits (%)", y="GO term", colour="FDR", size="Count")
+dev.off()
+```
+
